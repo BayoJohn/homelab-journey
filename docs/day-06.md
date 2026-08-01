@@ -1,6 +1,6 @@
 
 
-# Day X – Investigating Severe Storage I/O Bottlenecks and Recovering a Corrupted Kubernetes Control Plane VM
+# Day 6 – Investigating Severe Storage I/O Bottlenecks and Recovering a Corrupted Kubernetes Control Plane VM
 
 ## Objective
 
