@@ -5,10 +5,10 @@ Welcome to my homelab documentation repository. This project tracks my daily pro
 ## Visual Highlights
 
 ### GitOps Delivery with ArgoCD
-![ArgoCD Dashboard](docs/assets/43-argocd-dashboard-empty-applications-view.png)
+![ArgoCD Dashboard](docs/assets/gitops/43-argocd-dashboard-empty-applications-view.png)
 
 ### Centralized Logging (Grafana, Loki, & Alloy)
-![Grafana Explore](docs/assets/44-grafana-explore-loki-datasource-query-builder.png)
+![Grafana Explore](docs/assets/observability/44-grafana-explore-loki-datasource-query-builder.png)
 
 ---
 
