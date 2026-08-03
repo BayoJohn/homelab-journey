@@ -1,0 +1,124 @@
+enableRbac: true
+
+serviceAccount:
+  create: true
+  name: homepage
+
+service:
+  main:
+    ports:
+      http:
+        port: 3000
+
+ingress:
+  main:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - host: homepage.local
+        paths:
+          - path: /
+            pathType: Prefix
+
+env:
+  - name: HOMEPAGE_ALLOWED_HOSTS
+    value: "homepage.local,homepage.local:31518"
+
+config:
+  kubernetes:
+    mode: cluster
+
+  bookmarks:
+    - Developer:
+        - GitHub:
+            - abbr: GH
+              href: https://github.com/BayoJohn
+        - Homelab Documentation:
+            - abbr: DOC
+              href: https://github.com/BayoJohn/homelab-journey
+
+  services:
+    - Infrastructure:
+        - Proxmox:
+            href: https://10.0.0.2:8006
+            description: Virtualization platform
+            icon: proxmox.png
+
+        - Longhorn:
+            href: http://longhorn.local:31518
+            description: Distributed Kubernetes storage
+            icon: longhorn.png
+
+    - GitOps:
+        - Argo CD:
+            href: http://argocd.local:31518
+            description: Kubernetes GitOps controller
+            icon: argo-cd.png
+
+        - Gitea:
+            href: http://gitea.local:31518
+            description: Self-hosted Git service
+            icon: gitea.png
+
+    - Observability:
+        - Grafana:
+            href: http://grafana.local:31518
+            description: Metrics and log visualization
+            icon: grafana.png
+
+        - Prometheus:
+            href: http://prometheus.local:31518
+            description: Metrics collection and storage
+            icon: prometheus.png
+
+        - Loki:
+            href: http://grafana.local:31518/explore
+            description: Centralized log storage
+            icon: loki.png
+
+        - Alertmanager:
+            href: http://alertmanager.local:31518
+            description: Alert routing and notifications
+            icon: alertmanager.png
+
+  widgets:
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+          label: "K3s Cluster"
+        nodes:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+
+    - search:
+        provider: duckduckgo
+        target: _blank
+
+    - datetime:
+        text_size: xl
+        format:
+          timeStyle: short
+          dateStyle: long
+          hourCycle: h23
+
+  settingsString: |
+    title: Bayo DevOps Platform
+    description: Self-hosted Kubernetes and DevOps homelab
+    headerStyle: boxed
+    statusStyle: dot
+    hideVersion: false
+    layout:
+      Infrastructure:
+        style: row
+        columns: 2
+      GitOps:
+        style: row
+        columns: 2
+      Observability:
+        style: row
+        columns: 4
