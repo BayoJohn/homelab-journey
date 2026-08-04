@@ -1,0 +1,50 @@
+gitea:
+  admin:
+    existingSecret: gitea-admin
+
+  config:
+    server:
+      DOMAIN: gitea.local
+      ROOT_URL: http://gitea.local:31518/
+      SSH_DOMAIN: gitea.local
+      SSH_PORT: 30022
+
+persistence:
+  enabled: true
+  storageClass: longhorn-two-replicas
+  size: 2Gi
+
+service:
+  http:
+    type: ClusterIP
+    port: 3000
+
+  ssh:
+    type: NodePort
+    port: 22
+    nodePort: 30022
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: gitea.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+postgresql-ha:
+  enabled: false
+
+postgresql:
+  enabled: true
+  primary:
+    persistence:
+      enabled: true
+      storageClass: longhorn-two-replicas
+      size: 2Gi
+
+valkey-cluster:
+  enabled: true
+  persistence:
+    enabled: false

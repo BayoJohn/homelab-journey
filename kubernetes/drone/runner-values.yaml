@@ -1,0 +1,15 @@
+replicaCount: 1
+
+extraSecretNamesForEnvFrom:
+  - drone-secrets
+
+rbac:
+  buildNamespaces:
+    - drone-builds
+
+env:
+  DRONE_RPC_HOST: "drone.drone.svc.cluster.local:8080"
+  DRONE_RPC_PROTO: "http"
+  DRONE_NAMESPACE_DEFAULT: "drone-builds"
+  DRONE_RUNNER_NAME: "k3s-runner"
+  DRONE_RUNNER_CAPACITY: "2"

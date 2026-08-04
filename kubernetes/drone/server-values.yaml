@@ -1,0 +1,34 @@
+hostAliases:
+  - ip: "10.0.0.50"
+    hostnames:
+      - "gitea.local"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: drone.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+persistentVolume:
+  enabled: true
+  storageClass: longhorn-two-replicas
+  size: 2Gi
+
+extraSecretNamesForEnvFrom:
+  - drone-secrets
+
+env:
+  DRONE_SERVER_HOST: "drone.local:31518"
+  DRONE_SERVER_PROTO: "http"
+
+  DRONE_GITEA_SERVER: "http://gitea.local:31518"
+  DRONE_GIT_ALWAYS_AUTH: "true"
+
+  DRONE_USER_CREATE: "username:bayo,admin:true"
