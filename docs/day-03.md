@@ -1,4 +1,4 @@
-# Day 4 – Expanding My Kubernetes Homelab and Deploying Longhorn
+# Day 3 – Expanding My Kubernetes Homelab and Deploying Longhorn
 
 One of the main reasons I chose to build a homelab instead of depending entirely on cloud platforms was that I wanted to experience the kinds of problems that happen in real infrastructure.
 
