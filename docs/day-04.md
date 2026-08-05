@@ -1,352 +1,345 @@
 # Day 4 – Understanding Kubernetes Persistent Storage with Longhorn
 
-## Overview
+After successfully joining the worker node to my k3s cluster and getting Longhorn running, I could have simply moved on to installing another application. However, I realised that having Longhorn installed did not necessarily mean I understood what it was doing.
 
-Today's objective was not simply to deploy another Kubernetes component but to begin understanding one of the most important concepts in Kubernetes: **persistent storage**.
+Seeing all the Longhorn Pods in a `Running` state only confirmed that the software had started successfully. It did not prove that Kubernetes could request storage from it, that Longhorn could create a volume, or that application data would survive after a Pod was deleted.
 
-Up to this point, the cluster had been successfully built and Longhorn had been installed and was running correctly. However, simply having a storage solution installed is not enough. As DevOps engineers, we must verify that the storage platform behaves as expected and understand how Kubernetes interacts with it.
+Today, I decided to slow down and understand one of the most important parts of running applications on Kubernetes: persistent storage.
 
-Today's work focused on learning how Kubernetes dynamically provisions storage, how Longhorn integrates with Kubernetes through the Container Storage Interface (CSI), and how PersistentVolumeClaims (PVCs), PersistentVolumes (PVs), and StorageClasses work together.
+Until now, most of the workloads I had deployed were stateless. If an Nginx Pod was deleted, Kubernetes could simply create another one without causing any serious problem. The replacement Pod would use the same container image and continue serving the application.
 
----
+That approach does not work for every application.
 
-# Objectives
+Databases, CI/CD platforms, file-sharing systems, object-storage services, and source-code platforms all need somewhere reliable to keep their data. If their files exist only inside a container, deleting the container may also delete everything the application has stored.
 
-The goals for today's session were:
+My goal for the day was therefore not just to create a storage resource. I wanted to follow the entire process from the moment Kubernetes receives a request for storage to the point where Longhorn creates the actual volume.
 
-* Understand why Kubernetes requires persistent storage.
-* Learn the difference between ephemeral and persistent storage.
-* Examine the StorageClasses configured in the cluster.
-* Ensure Longhorn was the default storage provider.
-* Create a PersistentVolumeClaim.
-* Observe Kubernetes dynamically provision storage through Longhorn.
-* Inspect the PersistentVolume created by Kubernetes.
-* Verify that Longhorn successfully created the underlying storage volume.
-* Understand each layer involved in Kubernetes storage provisioning.
+## Why Containers Need Persistent Storage
 
-Unlike previous sessions that focused on infrastructure deployment, today's session focused primarily on understanding the architecture behind Kubernetes storage.
+Containers are designed to be temporary.
 
----
+Kubernetes can stop a container, delete its Pod, move the workload to another node, or create a replacement at any time. This flexibility is one of the reasons Kubernetes is so useful, but it also means that the filesystem inside a container should not be trusted as permanent storage.
 
-# Why Persistent Storage Matters
+For a stateless web server, this is usually not a problem. The Pod can disappear and another one can start using the same image.
 
-Containers are designed to be **ephemeral**, meaning they can be created, destroyed, and recreated at any time.
+For a database, the situation is completely different.
 
-When a container is deleted, everything stored inside the container's writable filesystem is lost.
+If PostgreSQL stores all its database files only inside the container filesystem, deleting the Pod could mean losing every database, table, and record stored there. The application might restart successfully, but it would return with an empty database.
 
-For stateless applications such as web servers or API gateways, this behaviour is acceptable because the application can simply start again without requiring any previous data.
+The same concern applies to applications such as MySQL, MongoDB, Jenkins, Gitea, Nextcloud, and MinIO. Their data needs to exist independently of the containers that use it.
 
-However, many production applications cannot function this way.
+Kubernetes solves this by separating the application from its storage.
 
-Examples include:
+A Pod can be deleted and recreated, while the storage volume continues to exist. When the replacement Pod starts, Kubernetes can attach the same volume and make the original data available again.
 
-* PostgreSQL
-* MySQL
-* MongoDB
-* Gitea
-* Nextcloud
-* Jenkins
-* MinIO
+This was the behaviour I wanted to begin testing with Longhorn.
 
-These applications store important data that must survive container restarts, node failures, upgrades, or rescheduling.
+## Understanding What Longhorn Provides
 
-If a PostgreSQL Pod is deleted and its database exists only inside the container filesystem, every table and every record would disappear.
+Longhorn is a distributed block-storage system designed specifically for Kubernetes.
 
-To solve this problem, Kubernetes separates compute from storage.
+Instead of manually creating a disk every time an application needs storage, Longhorn integrates with Kubernetes and creates volumes automatically. It can also replicate data, rebuild failed replicas, create snapshots, expand volumes, and support backups.
 
-Instead of storing data inside the container, applications store data inside persistent volumes that exist independently of the Pod itself.
+This makes it useful for a homelab because it allows me to experiment with storage concepts that are normally provided by cloud platforms.
 
-This design allows applications to be recreated while keeping their data intact.
+For example, managed Kubernetes environments can use storage services such as Amazon EBS, Azure Managed Disks, or Google Persistent Disk. In my own environment, Longhorn performs a similar role by providing block storage from the disks attached to my cluster nodes.
 
----
+The important part was understanding how Kubernetes communicates with Longhorn.
 
-# What is Longhorn?
+Kubernetes does not directly understand the internal design of every storage platform. Instead, it uses the Container Storage Interface, commonly called CSI.
 
-Longhorn is a cloud-native distributed block storage platform built specifically for Kubernetes.
+Longhorn provides a CSI driver that acts as the connection between Kubernetes and the Longhorn storage system. When Kubernetes needs a volume, it sends the request through the CSI driver, and Longhorn handles the actual creation and management of that storage.
 
-It is developed by Rancher and provides dynamically provisioned persistent storage using Kubernetes-native components.
+## Following the Kubernetes Storage Chain
 
-Instead of manually creating storage volumes, Longhorn automatically provisions storage whenever a PersistentVolumeClaim is created.
+One of the most useful things I learned today was that creating storage in Kubernetes involves several connected objects.
 
-Longhorn also provides production-grade storage capabilities such as:
+The process can be represented like this:
 
-* Dynamic volume provisioning
-* Volume replication
-* Snapshots
-* Backups
-* Volume expansion
-* Replica rebuilding
-* Automatic recovery after failures
-
-These features make Longhorn an excellent learning platform because it introduces concepts commonly found in enterprise storage solutions while remaining relatively simple to operate.
-
-In managed Kubernetes services, cloud providers offer similar functionality through services such as:
-
-* AWS Elastic Block Store (EBS)
-* Azure Managed Disks
-* Google Persistent Disks
-
-Longhorn allows these same concepts to be explored within a homelab environment.
-
----
-
-# Understanding Kubernetes Storage Components
-
-One of the most valuable lessons today was understanding that Kubernetes storage consists of multiple layers working together.
-
-The storage workflow can be visualised as follows:
-
+```text
 Application
-
-↓
-
+    ↓
 Pod
-
-↓
-
-PersistentVolumeClaim (PVC)
-
-↓
-
+    ↓
+PersistentVolumeClaim
+    ↓
 StorageClass
-
-↓
-
+    ↓
 Longhorn CSI Driver
-
-↓
-
-PersistentVolume (PV)
-
-↓
-
+    ↓
+PersistentVolume
+    ↓
 Longhorn Volume
-
-↓
-
+    ↓
 Physical Disk
+```
 
-Each component has a specific responsibility.
+Before today, terms such as PersistentVolumeClaim, PersistentVolume, and StorageClass seemed closely related, but I did not fully understand where one ended and another began.
 
-### Pod
+The Pod runs the application, but it does not normally ask Longhorn for storage directly. Instead, it refers to a PersistentVolumeClaim.
 
-The Pod runs the application.
+A PersistentVolumeClaim, or PVC, is the application’s request for storage. It describes what the application needs, including the capacity, access mode, and sometimes the StorageClass that should be used.
 
-It does not manage storage directly.
+The PVC is not the disk itself. It is only the request.
 
-Instead, it requests storage through a PersistentVolumeClaim.
+The StorageClass tells Kubernetes how that request should be fulfilled. It identifies the storage provisioner and contains settings that control how new volumes should be created.
 
-### PersistentVolumeClaim (PVC)
+In my cluster, the Longhorn StorageClass uses the Longhorn CSI driver. When Kubernetes sees a PVC that should use Longhorn, it passes the request to `driver.longhorn.io`.
 
-The PVC represents a request for storage.
+Longhorn then creates the underlying volume, while Kubernetes creates a PersistentVolume object to represent that storage inside the cluster.
 
-It specifies requirements such as:
+The PersistentVolume, or PV, is therefore the Kubernetes representation of the real storage resource that was created to satisfy the claim.
 
-* Capacity
-* Access mode
-* StorageClass
+Understanding this chain made the storage process feel much less mysterious.
 
-The PVC does not create storage itself.
+## Inspecting the Available StorageClasses
 
-Instead, it asks Kubernetes to provide storage that satisfies its requirements.
+I began the practical work by checking the StorageClasses installed in the cluster.
 
-### StorageClass
-
-The StorageClass defines how Kubernetes should provision storage.
-
-Because Longhorn was configured as the default StorageClass, Kubernetes automatically selected Longhorn whenever a PVC was created without explicitly specifying a storageClassName.
-
-### CSI Driver
-
-The Container Storage Interface (CSI) provides a standard method for Kubernetes to communicate with storage systems.
-
-Rather than Kubernetes understanding every storage vendor individually, it communicates through the CSI standard.
-
-Longhorn implements a CSI driver, allowing Kubernetes to request new storage volumes without needing to understand Longhorn's internal implementation.
-
-### PersistentVolume (PV)
-
-The PersistentVolume represents the actual storage resource allocated by Kubernetes.
-
-Unlike the PVC, which is simply a request, the PV represents the real storage object that satisfies that request.
-
-### Longhorn Volume
-
-Finally, Longhorn creates and manages the actual storage volume on the cluster nodes.
-
-This volume exists independently of the application and can be attached to Pods when required.
-
----
-
-# Inspecting the StorageClasses
-
-The first practical task was examining the StorageClasses configured within the cluster.
+```bash
+kubectl get storageclass
+```
 
 The cluster contained three StorageClasses:
 
-* local-path
-* longhorn
-* longhorn-static
+```text
+local-path
+longhorn
+longhorn-static
+```
 
-An unexpected discovery was that both **local-path** and **longhorn** were configured as default StorageClasses.
+The `local-path` StorageClass was installed as part of k3s. It provisions storage from the local filesystem of a Kubernetes node.
 
-While Kubernetes can technically handle multiple default StorageClasses, doing so introduces unnecessary ambiguity because Kubernetes must determine which default should be used when a PersistentVolumeClaim does not specify one explicitly.
+The `longhorn` StorageClass was created by the Longhorn installation and supports dynamic provisioning through the Longhorn CSI driver.
 
-Production environments typically maintain a single default StorageClass to ensure predictable storage provisioning.
+The `longhorn-static` StorageClass is intended for working with existing Longhorn volumes rather than automatically creating new ones in the same way as the standard Longhorn class.
 
----
+While inspecting the output, I noticed something unexpected: both `local-path` and `longhorn` were marked as default StorageClasses.
 
-# Resolving Multiple Default StorageClasses
+A default StorageClass is automatically selected when a PVC does not explicitly provide a `storageClassName`.
 
-Inspection of the StorageClass YAML confirmed that both StorageClasses contained the annotation:
+Having more than one default is technically possible, but it makes the behaviour less obvious. Kubernetes may select the most recently created default class for claims that do not name one directly. I wanted storage provisioning in the cluster to be predictable, so I decided that Longhorn should be the only default.
 
+## Making Longhorn the Default Storage Provider
+
+I inspected the StorageClass definitions and confirmed that both contained the default-class annotation:
+
+```text
 storageclass.kubernetes.io/is-default-class: "true"
+```
 
-The local-path StorageClass was patched to remove its default designation.
+I removed the default designation from `local-path` by changing its annotation to `false`.
 
-After verification, Longhorn became the cluster's only default StorageClass.
+```bash
+kubectl patch storageclass local-path \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+```
 
-This ensures that all future PersistentVolumeClaims automatically use Longhorn unless another StorageClass is explicitly requested.
+After applying the change, I checked the StorageClasses again.
 
----
+```bash
+kubectl get storageclass
+```
 
-# Creating the PersistentVolumeClaim
+Longhorn was now the only class marked as default.
 
-A PersistentVolumeClaim named **demo-pvc** was created requesting:
+This meant that any future PersistentVolumeClaim created without a `storageClassName` would automatically use Longhorn.
 
-* 2 GiB of storage
-* ReadWriteOnce access
+Making this change also helped me understand that installing a new storage system does not automatically mean every application will begin using it. The default StorageClass determines which provisioner handles claims that do not request a specific class.
 
-No StorageClass was specified.
+## Creating My First PersistentVolumeClaim
 
-Because Longhorn was now the default StorageClass, Kubernetes automatically selected Longhorn during provisioning.
+With Longhorn configured as the only default StorageClass, I created a PersistentVolumeClaim named `demo-pvc`.
 
-This demonstrated Kubernetes' dynamic provisioning capabilities.
+The claim requested 2 GiB of storage and used the `ReadWriteOnce` access mode.
 
----
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+```
 
-# Dynamic Provisioning Process
+I deliberately left out the `storageClassName`.
 
-When the PersistentVolumeClaim was created, Kubernetes automatically initiated a sequence of operations.
+This allowed me to test whether Kubernetes would automatically select Longhorn as the default provisioner.
 
-The PVC was accepted by the Kubernetes API.
+I saved the configuration and applied it to the cluster.
 
-The PersistentVolume Controller recognised that no matching PersistentVolume already existed.
+```bash
+kubectl apply -f demo-pvc.yaml
+```
 
-The controller contacted the Longhorn CSI provisioner.
+After creating the claim, I checked its status.
 
-The Longhorn CSI driver created a new storage volume.
+```bash
+kubectl get pvc
+```
 
-Kubernetes automatically created a matching PersistentVolume.
+The claim eventually entered the `Bound` state.
 
-Finally, the PersistentVolumeClaim transitioned into the **Bound** state.
+That single status represented several operations happening behind the scenes.
 
-This entire process occurred without manually creating a PersistentVolume.
+Kubernetes accepted the PVC through the API server. It recognised that no existing PersistentVolume satisfied the request. Because the claim did not specify a StorageClass, Kubernetes selected the default Longhorn class.
 
-One of Kubernetes' most powerful features is this ability to provision infrastructure dynamically based on application requirements.
+The Longhorn CSI provisioner then received the request and created a new volume. Kubernetes created a matching PersistentVolume and bound it to `demo-pvc`.
 
----
+I had only created a claim, but Kubernetes and Longhorn had handled the rest of the process automatically.
 
-# Inspecting the PersistentVolume
+That was my first clear demonstration of dynamic storage provisioning.
 
-The newly created PersistentVolume was examined using `kubectl describe pv`.
+## Inspecting the PersistentVolume
 
-Important observations included:
+After confirming that the claim was bound, I checked the PersistentVolume that Kubernetes had created.
 
-* The storage driver was `driver.longhorn.io`.
-* The filesystem type was ext4.
-* The volume had been provisioned through the Longhorn CSI driver.
-* The PersistentVolume had automatically been associated with the PersistentVolumeClaim.
+```bash
+kubectl get pv
+```
 
-This inspection demonstrated that Kubernetes had successfully translated the storage request into a real storage resource.
+I then described the volume to view its details.
 
----
+```bash
+kubectl describe pv <persistent-volume-name>
+```
 
-# Inspecting the Longhorn Volume
+Several details confirmed that the request had been handled by Longhorn.
 
-The Longhorn custom resources were then inspected.
+The volume used the CSI driver:
 
-The new Longhorn volume existed successfully.
+```text
+driver.longhorn.io
+```
 
-However, its state was:
+The filesystem type was:
 
-* Detached
-* Robustness: Unknown
+```text
+ext4
+```
 
-This was expected behaviour.
+The PersistentVolume also contained a claim reference pointing back to `demo-pvc`.
 
-Although storage had been provisioned, no Pod was yet using the PersistentVolumeClaim.
+This showed that the PVC and PV were now connected. The claim represented what the application had requested, while the PersistentVolume represented the storage Kubernetes had allocated to satisfy that request.
 
-Without a consumer, Longhorn had no reason to attach the volume to any node.
+The PV name itself had been generated automatically. I did not need to create or name the PersistentVolume manually.
 
-The volume therefore remained detached until an application requests access.
+This was one of the main benefits of dynamic provisioning.
 
----
+## Checking the Volume Inside Longhorn
 
-# Replica Configuration Observation
+The next step was to confirm that the volume also existed from Longhorn’s perspective.
 
-During inspection of the PersistentVolume configuration, an important production consideration was discovered.
+I inspected the Longhorn volume resources.
 
-Longhorn was configured with:
+```bash
+kubectl get volumes.longhorn.io -n longhorn-system
+```
 
+The new volume had been created successfully, but its state was shown as detached.
+
+Its robustness was also reported as unknown.
+
+At first, that looked like another possible failure. However, I realised that no Pod was currently using the claim.
+
+Longhorn had created the storage, but Kubernetes had not asked it to attach the volume to a node. There was no application consuming `demo-pvc`, so there was no reason for the volume to be mounted anywhere.
+
+The detached state was therefore expected.
+
+Once a Pod references the PVC, Kubernetes will schedule the Pod onto a node and request that Longhorn attach the volume to that node. The Longhorn CSI driver will then mount the filesystem so the container can use it.
+
+This helped me understand that creating a PVC and attaching a volume are separate stages.
+
+The storage can exist before any application begins using it.
+
+## Discovering the Replica Configuration
+
+While inspecting the Longhorn volume configuration, I noticed that the default replica count was set to three.
+
+```text
 numberOfReplicas = 3
+```
 
-However, the cluster currently consists of only two nodes.
+My cluster currently contains only two Kubernetes nodes.
 
-Because Longhorn attempts to distribute replicas across different nodes, it cannot satisfy a three-replica configuration using only two nodes.
+Ideally, Longhorn distributes replicas across different nodes so that losing one node does not destroy every copy of the data. With only two nodes, it cannot place three replicas on three separate machines.
 
-This will likely result in future volumes reporting a degraded state once attached.
+Depending on the replica scheduling and anti-affinity settings, Longhorn may be unable to schedule all three replicas as intended. Once the volume is attached and becomes active, this could cause it to report a degraded state because the requested redundancy level has not been fully achieved.
 
-Rather than immediately changing the replica count, the decision was made to leave the default unchanged temporarily.
+The simplest solution would be to reduce the default replica count to two.
 
-Observing degraded behaviour provides valuable insight into how distributed storage systems behave when redundancy requirements cannot be fully satisfied.
+However, I decided not to change it immediately.
 
-Understanding these operational behaviours is an important aspect of learning Kubernetes storage administration.
+I wanted to observe how Longhorn reports an unsatisfied replica requirement. Seeing the volume become degraded would help me understand the difference between a volume being available and a volume having its desired level of redundancy.
 
----
+A degraded volume may still function, but it does not have all the replicas required by its configuration. That means the application may continue working while the storage system warns that its fault tolerance has been reduced.
 
-# Challenges Encountered
+This is the kind of behaviour that would be important to recognise in a real production environment.
 
-The primary issue encountered today was discovering that two StorageClasses had been configured as defaults.
+## What I Learned
 
-Although the cluster remained functional, this configuration could lead to unpredictable storage provisioning.
+Today’s work was less about installing software and more about understanding what happens after the software has been installed.
 
-The issue was identified by inspecting the StorageClass resources directly.
+Before this session, I knew that PVCs were used to request storage, but I did not fully understand how the request travelled through Kubernetes and eventually became a Longhorn volume.
 
-After verifying the configuration, the unnecessary default designation was removed from the local-path StorageClass, leaving Longhorn as the single default storage provider.
+I now understand that a PersistentVolumeClaim is only a request. It describes the storage an application needs but does not represent the actual disk.
 
-No storage provisioning failures occurred after this change.
+The StorageClass determines which storage provider should fulfil that request. The CSI driver provides the standard communication layer between Kubernetes and the storage system.
 
----
+The PersistentVolume represents the allocated storage inside Kubernetes, while Longhorn manages the actual volume and its replicas on the cluster nodes.
 
-# Lessons Learned
+I also learned that a provisioned volume does not need to be attached immediately. Longhorn can create the volume and leave it detached until a Pod requests access to it.
 
-Today's session reinforced several important Kubernetes concepts.
+Another important discovery was the effect of having multiple default StorageClasses. The cluster still worked, but the provisioning behaviour was less predictable than I wanted. Making Longhorn the only default gave me clearer control over where future claims would be provisioned.
 
-Persistent storage is independent of application Pods.
+Finally, I began to understand the relationship between storage availability and redundancy. A volume can remain usable even when its desired replica count has not been fully satisfied, but that condition reduces fault tolerance and should not be ignored.
 
-Applications should never rely on container filesystems for important data.
+## Current Storage Status
 
-PersistentVolumeClaims represent requests rather than actual storage.
+By the end of the session, Longhorn was the only default StorageClass in the cluster.
 
-StorageClasses determine how storage is provisioned.
+The `demo-pvc` claim had successfully requested 2 GiB of storage without explicitly naming a StorageClass. Kubernetes automatically selected Longhorn, created a matching PersistentVolume, and bound the claim to it.
 
-CSI drivers provide a standard interface between Kubernetes and storage systems.
+Longhorn also created the underlying volume successfully. It remained detached because no Pod was using it yet.
 
-PersistentVolumes are created automatically through dynamic provisioning when supported by the storage backend.
+The storage provisioning process was working as expected.
 
-Longhorn volumes remain detached until an application actively mounts them.
+```text
+StorageClass
+────────────────────────────────
+Default provider        Longhorn
 
-Finally, understanding why each component exists is just as important as knowing how to create it.
+PersistentVolumeClaim
+────────────────────────────────
+Name                    demo-pvc
+Requested capacity      2 GiB
+Access mode             ReadWriteOnce
+Status                  Bound
 
----
+PersistentVolume
+────────────────────────────────
+Provisioner             driver.longhorn.io
+Filesystem              ext4
+Provisioning type       Dynamic
 
-# Next Steps
+Longhorn Volume
+────────────────────────────────
+State                   Detached
+Current consumer        None
+Default replicas        3
+Available nodes         2
+```
 
-The next session will focus on using the newly provisioned storage.
+## Next Steps
 
-A test Pod will mount the PersistentVolumeClaim and write data to the volume.
+The next stage will be to create a test Pod that mounts `demo-pvc`.
 
-The Pod will then be deleted and recreated to verify that the data persists independently of the container.
+The Pod will write a file to the Longhorn volume. I will then delete the Pod and create a replacement that mounts the same claim.
 
-This experiment will demonstrate the core purpose of persistent storage in Kubernetes and validate that Longhorn is functioning correctly within the cluster.
+If the file remains available after the original Pod has been removed, it will prove that the data exists independently of the container.
+
+That experiment will move the lesson from storage provisioning to actual data persistence and demonstrate the main reason PersistentVolumes are necessary in Kubernetes.
