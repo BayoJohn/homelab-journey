@@ -1,57 +1,105 @@
-## Day 1 – Building the Foundation of the Homelab
+# Day 1 – Building the Foundation of My Homelab
 
-Today's objective was to establish the foundation upon which the rest of the homelab will be built. Rather than rushing to install technologies such as Docker or Kubernetes, the focus was on creating a stable infrastructure that can reliably host those technologies later. A common mistake made by beginners is to install applications without first understanding the environment in which they operate. The approach taken here was the opposite: build the infrastructure first, verify that it functions correctly, and only then begin deploying services.
+Today marked the beginning of my homelab project. My main objective was not to start installing Docker, Kubernetes, or any other advanced technology. Instead, I wanted to build a solid foundation that could support everything I plan to deploy later.
 
-### Hardware and Network Architecture
+It can be tempting to begin a homelab project by immediately installing applications and services. However, I decided to take a different approach. I wanted to first understand the environment, configure the network properly, and confirm that the machines could communicate reliably. Once the foundation was stable, I could then begin adding more complex tools without constantly running into avoidable infrastructure problems.
 
-The homelab consists of two Dell OptiPlex 3050 systems, each equipped with 16 GB of RAM:
+## Setting Up the Hardware
 
-* **Management Workstation:** Runs Ubuntu Desktop. This machine is responsible for administering the entire lab, accessing servers through SSH, writing Infrastructure as Code, and eventually running tools such as Terraform, Ansible, and Visual Studio Code.
-* **Hypervisor:** Runs Proxmox Virtual Environment, a Type-1 hypervisor that hosts all virtual machines required throughout the project.
+My homelab currently consists of two Dell OptiPlex 3050 systems, each with 16 GB of RAM.
 
-At this stage, the Ubuntu workstation and the Proxmox server are connected directly using an Ethernet cable. Since the Proxmox server does not currently have direct internet access, the Ubuntu workstation temporarily acts as both the management workstation and the internet gateway. Internet connectivity is provided through USB tethering from a mobile phone connected to the Ubuntu workstation.
+The first system runs Ubuntu Desktop and serves as my management workstation. This is the computer I use to access the lab, connect to servers through SSH, write configuration files, and manage the rest of the environment. As the project grows, I also plan to use this machine for tools such as Terraform, Ansible, Git, and Visual Studio Code.
 
-Although this architecture is not intended as the final design, it provides a functional environment while allowing valuable exposure to Linux networking concepts such as routing, forwarding, and network address translation (NAT).
+The second system runs Proxmox Virtual Environment. It acts as the hypervisor and will host the virtual machines used throughout the project.
 
-### Deploying the First Virtual Machine
+For now, both computers are connected directly using an Ethernet cable. The Proxmox server does not yet have its own direct internet connection, so the Ubuntu workstation temporarily performs two roles. It acts as my management machine and also serves as the internet gateway for the lab.
 
-Once Proxmox was operational, an Ubuntu Server virtual machine was created to serve as the first server in the environment. This virtual machine was assigned a static IP address to ensure that its network identity remains consistent across reboots.
+The Ubuntu computer receives internet access through USB tethering from my mobile phone. It then shares that connection with the Proxmox network through the Ethernet interface.
 
-Static addressing is particularly important in server environments because services such as SSH, Kubernetes, and configuration management tools rely on predictable IP addresses. Unlike home computers, servers rarely obtain new addresses through DHCP every time they boot.
+This is not the final network design I intend to use, but it gives me a functional starting point. It also gives me the opportunity to work directly with Linux networking concepts such as routing, IP forwarding, firewall rules, and Network Address Translation.
 
----
+## Creating My First Virtual Machine
 
-### Challenges and Troubleshooting
+After confirming that Proxmox was running, I created my first Ubuntu Server virtual machine.
 
-**1. SSH Connection Refused**
-The first challenge arose when attempting to connect to the virtual machine using SSH from the Ubuntu workstation. Instead of establishing a connection, SSH returned a "Connection Refused" error. This message was significant because it indicated that the workstation could successfully reach the virtual machine over the network, but the SSH service itself was unavailable. The error suggested that the OpenSSH server package had either not been installed or was not running. Before installing OpenSSH, however, another problem became apparent.
+This virtual machine would serve as the first proper server in the lab and eventually become the base for future systems. I assigned it a static IP address so that it would always remain reachable at the same location on the network.
 
-**2. Network Routing and NAT**
-Attempting to update the Ubuntu package repositories using `apt update` proved to be extremely slow and eventually failed. Rather than assuming that Ubuntu itself was broken, a structured troubleshooting process was followed:
+Using a static IP address is important in a server environment. Services such as SSH, Kubernetes, monitoring tools, and configuration-management systems depend on predictable network addresses. I did not want the server receiving a different IP address every time it restarted.
 
-* Network connectivity was tested first by attempting to reach known IP addresses on the local network.
-* Next, external addresses on the internet were tested.
+Once the machine had been created and configured, I attempted to connect to it from my Ubuntu workstation using SSH.
 
-Further investigation revealed that while communication within the local network functioned correctly, the virtual machine could not reach external networks. The virtual machine correctly forwarded traffic to the Ubuntu workstation, but the Ubuntu workstation was not translating those packets before forwarding them to the USB tether interface. Inspection of the firewall configuration confirmed this suspicion: existing NAT rules had been created automatically by Docker for its own bridge networks, but there was no equivalent rule for the homelab network (10.0.0.0/24).
+That was when the troubleshooting began.
 
-**The Fix:** The problem was resolved by creating a masquerade rule using `iptables`. This rule instructed the Linux kernel to replace the private source address of packets originating from the homelab network with the address assigned to the USB tether interface before forwarding them to the internet. Additional forwarding rules were also added to allow traffic to move between the internal Ethernet interface and the external USB interface.
+## The First Problem: SSH Connection Refused
 
-*Note: Once these rules were applied and NAT was functioning correctly, hostname resolution and DNS began working as expected.*
+When I tried to connect to the virtual machine, SSH returned a `Connection refused` error.
 
-**3. System Time Synchronization**
-Although internet connectivity and DNS were now fully operational, one final issue prevented successful package installation. Ubuntu reported that the repository release files were "not valid yet." This error was traced to an incorrect system clock inside the virtual machine. The virtual machine's date lagged behind the current date by several months, causing Ubuntu to reject repository metadata that appeared to originate from the future. This illustrated how seemingly unrelated subsystems—such as package management, cryptographic verification, and system time—are closely interconnected in modern operating systems.
+At first, this looked like a network problem, but the error actually provided a useful clue. A connection refusal usually means the destination machine can be reached, but there is no service listening on the requested port.
 
----
+In this case, the workstation was successfully reaching the virtual machine, but the SSH server was either not installed or not running.
 
-### Wrap-up and Next Steps
+The obvious next step was to install the OpenSSH server package. However, before I could do that, I needed to update the Ubuntu package repositories.
 
-By the end of the session, the networking infrastructure of the homelab had been successfully established. The virtual machine possessed a functional static IP configuration, could communicate with both the Proxmox host and the Ubuntu workstation, had full internet connectivity, successfully resolved domain names, and was ready for the installation of OpenSSH once the system clock issue was corrected.
+Running `apt update` revealed another problem.
 
-More importantly, the day's work reinforced the importance of systematic troubleshooting. Rather than applying random fixes, each layer of the network stack was tested independently until the precise cause of failure was identified and corrected.
+## Discovering the Internet Connectivity Issue
 
-**Next Stage Objectives:**
+The package update process was extremely slow and eventually failed. Instead of assuming something was wrong with Ubuntu or the package manager, I began testing the network one layer at a time.
 
-* Correct time synchronization.
-* Install OpenSSH Server and the QEMU Guest Agent.
-* Enable passwordless SSH authentication.
-* Prepare the Ubuntu virtual machine to become the reusable template from which future infrastructure components will be deployed.
+I first checked whether the virtual machine could communicate with other devices on the local network. It could reach both the Proxmox host and the Ubuntu workstation, which confirmed that the internal network configuration was working.
+
+I then tested access to external IP addresses. Those tests failed.
+
+This showed that the problem was not with communication inside the homelab. The virtual machine could send traffic to the Ubuntu workstation, but that traffic was not successfully leaving the workstation through the USB-tethered internet connection.
+
+The Ubuntu workstation was already forwarding packets, but it was not translating the private IP addresses used inside the homelab before sending them to the internet.
+
+When I inspected the firewall configuration, I noticed that Docker had already created several NAT rules for its own bridge networks. However, there was no matching rule for the homelab network, which uses the `10.0.0.0/24` address range.
+
+That missing rule was the main cause of the problem.
+
+## Fixing Routing and NAT
+
+To solve the issue, I created an `iptables` masquerade rule for the homelab network.
+
+The purpose of this rule was to replace the private source IP address of packets leaving the lab with the IP address assigned to the USB-tethering interface. This allowed return traffic from the internet to find its way back through the Ubuntu workstation and into the virtual machine.
+
+I also added forwarding rules to allow traffic to move between the internal Ethernet interface and the external USB interface.
+
+Once the rules were applied, I tested the connection again. This time, the virtual machine could reach external IP addresses. Domain-name resolution also began working, confirming that both internet access and DNS were functioning correctly.
+
+At that point, it appeared that the network problem had been solved.
+
+However, `apt update` still failed.
+
+## The Unexpected System-Time Problem
+
+The new error message stated that the Ubuntu repository release files were “not valid yet.”
+
+This was confusing at first because the virtual machine now had working internet access and DNS. After checking the system date, I discovered that the virtual machine's clock was several months behind the actual date.
+
+Because the server believed it was still an earlier date, the repository metadata appeared to come from the future. Ubuntu therefore rejected it as invalid.
+
+This was an important lesson for me because the problem had nothing to do with networking, even though it appeared immediately after the networking issue. It showed how package management, security verification, certificates, and system time are all connected.
+
+A server with an incorrect clock can experience problems with software repositories, HTTPS connections, authentication systems, logs, and other time-sensitive services.
+
+## What I Achieved
+
+By the end of the session, I had successfully established the basic network infrastructure for the homelab.
+
+The Ubuntu Server virtual machine had a static IP address and could communicate with the Proxmox host and the Ubuntu management workstation. It could also access the internet and resolve domain names through DNS.
+
+Although the system-time issue still needed to be corrected before I could complete the package installation, the most difficult part of the day had been resolved.
+
+The biggest lesson from today was the importance of troubleshooting problems systematically. Instead of changing multiple settings randomly, I tested each part of the network separately.
+
+I confirmed local communication first, followed by external connectivity, NAT, DNS, and finally system time. This made it easier to understand exactly where each problem was occurring and why.
+
+## Next Steps
+
+My next task will be to correct the time synchronization inside the virtual machine. Once that is working, I will install the OpenSSH server and the QEMU Guest Agent.
+
+After SSH is available, I will configure passwordless authentication from the Ubuntu workstation. The final goal is to prepare this virtual machine as a reusable template that can be cloned whenever I need to deploy additional servers in the homelab.
+
+Day 1 was mainly about building the foundation, and although I encountered several problems, each one helped me better understand how the different parts of the environment work together.
