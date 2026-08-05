@@ -1,328 +1,415 @@
+# Day 7 – Rebuilding My Kubernetes Homelab After a Cluster Failure
 
-# Day 3 - Rebuilding the Kubernetes Homelab After a Cluster Failure
+After spending the previous session investigating severe storage I/O problems and repairing a corrupted filesystem, I had to make a difficult decision about the future of the cluster.
 
-## Overview
+The control-plane virtual machine could boot again, but the Kubernetes environment itself was no longer reliable. SSH sessions still froze, API requests timed out, worker communication had become inconsistent, and several rounds of troubleshooting had left the system in a state that was increasingly difficult to understand.
 
-During the previous stage of the homelab project, the Kubernetes control plane became unstable after several configuration changes and repeated troubleshooting attempts. Although the cluster was partially operational, critical components such as the Kubernetes API, embedded datastore, and worker communication became unreliable.
+I could have continued trying to repair each problem individually. However, even if I managed to make the cluster appear healthy again, I would not have been completely confident that the underlying configuration was clean.
 
-Rather than continuing to repair an increasingly inconsistent environment, a decision was made to rebuild the cluster from scratch. This approach reduced technical debt, produced a cleaner architecture, and established a more resilient foundation for future workloads.
+At that point, rebuilding was no longer an admission of failure. It was the safer engineering decision.
 
-The objective of this session was not only to restore Kubernetes but also to redesign the deployment process so that future recovery would require only a few minutes through Proxmox snapshots.
+My goal for Day 7 was therefore not only to restore Kubernetes but to rebuild the homelab in a more controlled way. I wanted a clean installation, clearly defined deployment stages, validation after every major change, and reliable recovery points that would prevent me from repeating the entire process whenever something broke.
 
----
+## Why I Stopped Repairing the Previous Cluster
 
-# Why the Previous Cluster Was Abandoned
+The previous cluster had accumulated several problems over time.
 
-The previous deployment experienced multiple issues that accumulated over time.
+The control plane had become unstable after repeated configuration changes and troubleshooting attempts. The embedded k3s datastore required manual inspection, the VM filesystem had become corrupted, and communication between the control plane and worker node was no longer dependable.
 
-## Problems Encountered
+The Proxmox side of the environment had also become messy. VM lock files interfered with shutdown and deletion, logical volumes remained attached after failed operations, and it became increasingly difficult to tell whether each new error came from Kubernetes, Ubuntu, Proxmox, or the storage layer underneath them.
 
-* Control plane instability after multiple configuration modifications.
-* Embedded SQLite datastore inconsistencies requiring manual inspection.
-* Virtual machine lock files preventing proper shutdown and deletion.
-* Storage volumes remaining attached after VM deletion.
-* Multiple networking inconsistencies while rebuilding Kubernetes.
-* Difficulty determining whether failures originated from Kubernetes or the underlying virtual machine.
+The longer I continued repairing the same environment, the more technical debt I introduced.
 
-Although several repair procedures were attempted, the environment had become increasingly difficult to trust.
+Even when one issue was resolved, I could not be certain that another hidden inconsistency would not appear later. A cluster may look healthy because its nodes report `Ready`, but that does not necessarily mean its datastore, storage, networking, and configuration are all trustworthy.
 
-Rather than spending additional time repairing an unstable cluster, a full rebuild was considered the safer engineering decision.
+I decided that a clean rebuild would give me something more valuable than another temporary fix: a known-good foundation.
 
----
+## Redesigning the Recovery Strategy
 
-# Recovery Strategy
+I did not want to recreate the previous environment in exactly the same way.
 
-Instead of recreating the previous environment exactly, several improvements were introduced.
+The original cluster had grown one component at a time, but I had not created clear recovery points between those stages. When the control plane failed, there was no simple way to return to the last stable version of the infrastructure.
 
-## New Design Goals
+This time, I divided the rebuild into separate phases.
 
-* Clean Kubernetes installation
-* Predictable static IP addresses
-* Better VM lifecycle management
-* Snapshot-based recovery
-* Separation of infrastructure installation into distinct stages
-* Validation after each major component
+The first phase would contain only a clean Ubuntu Server installation and a working k3s control plane. The next phase would introduce the worker node and validate cluster scheduling. After that, I would add ingress, persistent storage, and finally Argo CD.
 
-The deployment process was redesigned so that every major milestone could be verified independently before proceeding.
+Each phase had to be tested before I moved to the next one.
 
----
+I also decided to create Proxmox snapshots after important milestones. These snapshots would not replace proper application backups, but they would give me a fast way to recover the lab’s virtual machines after a failed configuration change.
 
-# Phase 1 – Removing the Old Environment
+Instead of spending hours reinstalling everything, I could return to a recent known-good state and continue from there.
 
-The failed control-plane virtual machine was removed from Proxmox.
+## Removing the Failed Environment
 
-During deletion another issue appeared:
+The rebuild began by removing the old control-plane virtual machine.
 
-* VM configuration locks
-* Attached LVM volumes
-* Locked logical volumes preventing deletion
+Even this process presented another challenge.
 
-These were manually released before recreating the virtual machine.
+Proxmox reported configuration locks, and some of the VM’s logical volumes remained attached. These locks prevented the machine from being cleanly removed until I manually released the affected resources.
 
-This reinforced an important lesson:
+This was another reminder that infrastructure cleanup deserves the same level of care as infrastructure deployment.
 
-> Infrastructure cleanup is just as important as deployment.
+Deleting a VM from the interface does not always mean every related resource has disappeared. Virtual disks, logical volumes, snapshots, and lock files may remain behind and interfere with future deployments.
 
----
+Once I confirmed that the old VM and its associated storage had been removed correctly, I began creating the replacement control plane.
 
-# Phase 2 – Building a Fresh Control Plane
+## Building a Fresh Control Plane
 
-A new Ubuntu Server virtual machine was installed.
+I installed a new Ubuntu Server virtual machine and gave it the same predictable network identity I had used previously.
 
-Configuration included:
+```text
+Hostname:     k3s-control
+IP address:   10.0.0.50
+Gateway:      10.0.0.1
+DNS servers:  1.1.1.1, 8.8.8.8
+```
 
-| Component  | Value            |
-| ---------- | ---------------- |
-| Hostname   | k3s-control      |
-| IP Address | 10.0.0.50        |
-| Gateway    | 10.0.0.1         |
-| DNS        | 1.1.1.1, 8.8.8.8 |
+The Ubuntu management machine at `10.0.0.1` continued to serve as the gateway between the homelab network and the internet connection.
 
-SSH connectivity was verified before installing Kubernetes.
+Before installing Kubernetes, I verified the basics.
 
----
+The VM could communicate with the Proxmox host, reach the management workstation, resolve domain names, access the internet, and accept SSH connections.
 
-# Phase 3 – Installing K3s
+I deliberately avoided installing additional software until those checks passed.
 
-K3s was installed without the default Traefik ingress controller.
+One of the lessons from the failed environment was that Kubernetes should not be used to hide an unstable operating system or network. If the VM cannot maintain reliable connectivity before Kubernetes is installed, adding Kubernetes will only make troubleshooting more complicated.
+
+## Installing a Clean K3s Control Plane
+
+I installed k3s without its bundled Traefik Ingress Controller.
 
 ```bash
 curl -sfL https://get.k3s.io | \
 INSTALL_K3S_EXEC="server --disable traefik" sh -
 ```
 
-Verification included:
+I disabled Traefik because I planned to install the NGINX Ingress Controller separately. This gave me more control over the ingress layer and prevented two controllers from competing for the same role.
 
-* Node status
-* System pods
-* Cluster information
-* API availability
+Once the installation completed, I checked the node status.
 
-The node successfully entered the Ready state.
+```bash
+kubectl get nodes
+```
 
----
+I also inspected the system Pods.
 
-# Phase 4 – Worker Node Deployment
+```bash
+kubectl get pods -A
+```
 
-Instead of manually reinstalling Ubuntu, the control-plane VM was cloned.
+The control-plane node entered the `Ready` state, the Kubernetes API responded normally, and the core k3s components were running.
 
-The clone was modified by changing:
+This became the first stable milestone of the new environment.
 
-* Hostname
-* Static IP
-* Machine identity
-* SSH host keys
+Before moving forward, I created a Proxmox snapshot of the clean installation. If a later component damaged the cluster, I would no longer need to reinstall Ubuntu and k3s from the beginning.
 
-The worker joined the cluster using the node token generated on the control plane.
+## Creating the Worker from a Clone
 
-Final cluster state:
+Instead of manually installing another Ubuntu Server VM, I cloned the fresh control-plane machine.
+
+Cloning saved time, but I also knew that the clone could not be used safely without changing the identity it had inherited from the original VM.
+
+I changed the hostname, assigned a new static IP address, regenerated the SSH host keys, and ensured the machine identity was no longer the same as the control plane.
+
+The worker was configured as:
+
+```text
+Hostname:    k3s-worker1
+IP address:  10.0.0.51
+```
+
+I then retrieved the node token from the control plane.
+
+```bash
+sudo cat /var/lib/rancher/k3s/server/node-token
+```
+
+On the worker, I used the token and the control plane’s API address to join the cluster.
+
+```bash
+curl -sfL https://get.k3s.io | \
+K3S_URL=https://10.0.0.50:6443 \
+K3S_TOKEN=<node-token> sh -
+```
+
+After the installation completed, I returned to the control plane and checked the nodes.
+
+```bash
+kubectl get nodes
+```
+
+The cluster now contained:
 
 ```text
 k3s-control
 k3s-worker1
 ```
 
----
+Both nodes reported `Ready`.
 
-# Phase 5 – Validating Scheduling
+The cluster had been restored, but I did not want to assume that node registration alone meant everything was working.
 
-Before installing additional software, Kubernetes scheduling was tested.
+## Testing Kubernetes Scheduling
 
-An NGINX deployment was created with two replicas.
+Before installing Longhorn, ingress, or any other major platform component, I created a simple NGINX deployment with two replicas.
 
-Kubernetes automatically scheduled pods across both nodes.
+The purpose was to test whether the scheduler could place workloads across the nodes and whether both machines could run Pods successfully.
+
+When I inspected the deployment using the wide output format, Kubernetes had distributed the replicas across the cluster.
 
 ```text
 Pod 1 → k3s-control
-
 Pod 2 → k3s-worker1
 ```
 
-This confirmed:
+This confirmed that the scheduler was functioning and that both nodes could receive workloads.
 
-* Scheduler
-* Networking
-* Inter-node communication
+It also demonstrated that the control plane and worker could communicate correctly through the cluster network.
 
-were functioning correctly.
+The test was intentionally simple. If NGINX could not run reliably across two nodes, there would have been no reason to introduce more complicated services.
 
----
+Once this test passed, I moved on to the ingress layer.
 
-# Phase 6 – Installing Ingress NGINX
+## Installing the NGINX Ingress Controller
 
-The NGINX Ingress Controller was installed.
+Because Traefik had been disabled during the k3s installation, the cluster did not yet have an Ingress Controller.
 
-Initially, image downloads repeatedly failed.
+I installed the NGINX Ingress Controller to handle HTTP traffic entering the cluster.
 
-Problems included:
+The installation did not become healthy immediately.
 
-* ImagePullBackOff
-* ErrImagePull
-* Slow downloads from registry.k8s.io
-
-Rather than reinstalling Kubernetes again, the root cause was investigated.
-
-Eventually the controller images completed downloading successfully.
-
-A simple NGINX application was exposed through Ingress.
-
-The following request succeeded:
+Several Pods reported:
 
 ```text
-Laptop
-
-↓
-
-webtest.local
-
-↓
-
-Ingress Controller
-
-↓
-
-Kubernetes Service
-
-↓
-
-NGINX Pod
+ImagePullBackOff
+ErrImagePull
 ```
 
-This verified:
+Downloads from `registry.k8s.io` were extremely slow, and some attempts timed out.
 
-* DNS resolution
-* NodePort
-* Ingress rules
-* Service routing
-* Pod networking
+This behaviour was familiar from the earlier cluster. The homelab was still dependent on an unstable upstream internet connection, so failed image pulls did not automatically mean the Kubernetes installation or ingress manifest was incorrect.
 
----
+Instead of deleting the deployment or reinstalling the cluster again, I inspected the Pod events and allowed Kubernetes to continue retrying.
 
-# Phase 7 – Installing Longhorn
+Eventually, the required images finished downloading and the ingress controller became operational.
 
-Longhorn was deployed as the cluster storage platform.
+## Testing the Full Ingress Path
 
-Initial deployment experienced:
+After the controller was running, I deployed a simple NGINX application and exposed it through an Ingress resource.
 
-* CSI components waiting for images
-* ImagePullBackOff
-* ContainerCreating delays
+I configured the hostname:
 
-Rather than assuming installation failure, the cluster was monitored.
+```text
+webtest.local
+```
 
-Eventually every CSI component became operational.
+The local request path now looked like this:
 
-Healthy Longhorn components included:
+```text
+Ubuntu Management Workstation
+            ↓
+       webtest.local
+            ↓
+   NGINX Ingress Controller
+            ↓
+      Kubernetes Service
+            ↓
+         NGINX Pod
+```
 
-* Longhorn Manager
-* Longhorn UI
-* CSI Provisioner
-* CSI Resizer
-* CSI Snapshotter
-* CSI Attacher
-* Instance Manager
-* Engine Images
+When I opened `webtest.local` from the management workstation, the NGINX page loaded successfully.
 
----
+This single test validated several parts of the environment at once.
 
-# Phase 8 – Installing Argo CD
+The local hostname resolved correctly, traffic reached the appropriate Kubernetes node, the ingress controller accepted the request, the Ingress rule matched the hostname, the Service forwarded the traffic, and the Pod returned the response.
 
-GitOps capabilities were introduced through Argo CD.
+The cluster was now doing more than running workloads internally. It could serve applications through a structured ingress layer.
 
-Deployment included:
+## Reinstalling Longhorn
 
-* Namespace creation
-* Official installation manifests
-* Ingress configuration
-* Local DNS mapping
+With networking and ingress confirmed, I began rebuilding the persistent-storage layer.
 
-A login redirect issue occurred because Argo CD was serving HTTPS internally while NGINX Ingress was proxying requests.
+I installed Longhorn across the two-node cluster.
 
-The solution involved:
+As before, the deployment initially showed several delayed or failed components. CSI Pods waited for images, engine components remained in `ContainerCreating`, and some workloads reported `ImagePullBackOff`.
 
-* Running the Argo CD server in insecure mode internally
-* Allowing NGINX Ingress to terminate HTTP traffic
+This time, I did not interpret every red status as proof that the installation was broken.
 
-After applying the configuration, the Argo CD dashboard became accessible.
+I checked the Pod events and confirmed that many of the delays came from slow external image downloads. Kubernetes continued retrying, and the components gradually became healthy as the required images arrived.
 
----
+Eventually, the Longhorn deployment included healthy instances of its major components:
 
-# Improving Platform Resilience
+```text
+Longhorn Manager
+Longhorn UI
+CSI Provisioner
+CSI Resizer
+CSI Snapshotter
+CSI Attacher
+Instance Manager
+Engine Image
+```
 
-One of the most significant improvements compared to the previous deployment was the recovery strategy.
+Once both Kubernetes nodes were recognised by Longhorn and its CSI components were running, I considered the storage phase complete.
 
-Instead of relying solely on backups, Proxmox snapshots were created after each stable milestone.
+I then created another Proxmox snapshot.
 
-Current recovery points include:
+At this point, I had a recovery state containing a clean two-node Kubernetes cluster, a working ingress controller, and distributed storage.
+
+## Introducing Argo CD
+
+The final major component for the day was Argo CD.
+
+The long-term goal of the homelab is to manage applications declaratively through Git. Instead of manually applying every Kubernetes manifest, I want the desired state of the cluster to live in a repository.
+
+Argo CD will continuously compare that desired state with what is actually running and apply changes when necessary.
+
+I created the Argo CD namespace and applied the official installation manifests.
+
+Once the Pods were running, I configured an Ingress resource and added a local DNS mapping so I could reach the dashboard using:
+
+```text
+argocd.local
+```
+
+The first attempt resulted in a redirect problem.
+
+Argo CD expected to serve HTTPS internally, while the NGINX Ingress Controller was proxying traffic differently. The browser was redirected repeatedly instead of reaching the login page.
+
+To resolve this, I configured the Argo CD server to run in insecure mode inside the cluster.
+
+In this context, insecure mode did not mean the service had been exposed publicly without protection. It meant Argo CD would accept plain HTTP traffic from the internal ingress layer rather than attempting to terminate TLS itself.
+
+The NGINX Ingress Controller could then handle the incoming request and forward it correctly to Argo CD.
+
+After applying the configuration, the dashboard became accessible through `argocd.local`.
+
+That became the next stable milestone, so I created another Proxmox snapshot.
+
+## Building Recovery into the Platform
+
+The most important improvement in this rebuild was not a new Kubernetes application.
+
+It was the recovery process.
+
+The environment now had snapshots representing clear stages of development:
 
 ```text
 Snapshot 1
-
-Fresh K3s Installation
-
-↓
-
+Fresh Ubuntu and K3s control plane
+        ↓
 Snapshot 2
-
-Ingress + Longhorn
-
-↓
-
+Two-node cluster, NGINX Ingress and Longhorn
+        ↓
 Snapshot 3
-
-Argo CD Installed
+Argo CD installed and accessible
 ```
 
-This dramatically reduces recovery time.
+If a future experiment damages Argo CD, I can return to the state before it was installed.
 
-Instead of rebuilding Kubernetes from scratch, the entire environment can now be restored within minutes.
+If a storage or ingress change destabilises the cluster, I can return to the clean k3s installation without reinstalling Ubuntu.
 
----
+These snapshots reduce recovery time dramatically, but they are not a complete replacement for proper backups. A snapshot stored on the same physical disk cannot protect the environment if that disk fails.
 
-# Lessons Learned
+For the homelab, however, they provide a practical way to recover quickly from configuration mistakes while I continue building a separate backup strategy for application data and cluster configuration.
 
-Several practical lessons emerged from this rebuild:
+## What I Learned
 
-* Rebuilding is sometimes faster and safer than prolonged repair.
-* Validate each infrastructure layer before installing additional software.
-* Image download delays do not necessarily indicate installation failure.
-* Cloning virtual machines significantly accelerates worker node deployment.
-* Static addressing simplifies Kubernetes administration.
-* Proxmox snapshots provide an effective disaster recovery mechanism for homelab environments.
-* A staged deployment process makes troubleshooting substantially easier.
+The biggest lesson from Day 7 was that rebuilding is sometimes more responsible than continuing to repair.
 
----
+Troubleshooting remains important, and the previous investigation taught me a great deal about storage, LVM, filesystem recovery, and virtual-machine internals. However, there comes a point where an environment has changed so many times that restoring confidence is more difficult than recreating it.
 
-# Current Architecture
+I also learned the value of validating infrastructure in layers.
+
+I verified Ubuntu networking before installing k3s. I checked the control plane before adding the worker. I tested scheduling before installing ingress. I validated ingress before introducing Longhorn, and I confirmed storage health before installing Argo CD.
+
+This staged approach made each problem easier to isolate because fewer components had changed between successful tests.
+
+Cloning also made worker deployment much faster, but it reinforced the importance of changing machine-specific information. A cloned VM must not retain the same hostname, network address, machine identity, or SSH host keys as its source.
+
+The repeated image-pull delays taught me not to confuse slow external dependencies with failed installations. `ImagePullBackOff` is a symptom, and Pod events are still necessary to determine whether the cause is DNS, connectivity, authentication, rate limiting, or an invalid image.
+
+Most importantly, I learned to include recovery in the design rather than treating it as something to consider only after the next failure.
+
+## Architecture at the End of Day 7
+
+By the end of the rebuild, the homelab architecture looked like this:
 
 ```text
-                     Ubuntu Laptop
-                           │
-                     /etc/hosts
-                           │
-                    argocd.local
-                    webtest.local
-                           │
-                 NGINX Ingress Controller
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-           Argo CD                  Applications
-              │
-              │
-     Kubernetes API Server
-              │
-      ┌───────┴────────┐
-      │                │
-k3s-control       k3s-worker1
-      │                │
-      └────────┬───────┘
-               │
-          Longhorn Storage
+                    Ubuntu Management Workstation
+                              │
+                    Local hostname mappings
+                              │
+                   ┌──────────┴──────────┐
+                   │                     │
+              argocd.local          webtest.local
+                   │                     │
+                   └──────────┬──────────┘
+                              │
+                  NGINX Ingress Controller
+                              │
+                   ┌──────────┴──────────┐
+                   │                     │
+                Argo CD             Applications
+                   │
+                   │
+              Kubernetes API
+                   │
+             ┌─────┴─────┐
+             │           │
+       k3s-control   k3s-worker1
+             │           │
+             └─────┬─────┘
+                   │
+             Longhorn Storage
 ```
 
-# What's Next
+The platform now had two healthy Kubernetes nodes, working ingress routing, distributed persistent storage, and an accessible Argo CD installation.
 
-With the cluster now stable, the focus shifts from infrastructure creation to GitOps-driven application management. The next phase will involve connecting Argo CD to your Git repository so that application deployments are managed declaratively. From there, you'll begin deploying your portfolio site, Prometheus, Grafana, Gitea, Harbor, Jenkins, and other services entirely through Git, creating a reproducible and production-style Kubernetes workflow.
+## Current Status
 
----
+```text
+Kubernetes
+────────────────────────────────
+Control plane           Ready
+Worker node             Ready
+Pod scheduling          Verified
+Inter-node networking   Working
+
+Ingress
+────────────────────────────────
+Controller              NGINX Ingress
+Test hostname           webtest.local
+External routing        Verified
+
+Storage
+────────────────────────────────
+Provider                Longhorn
+CSI components          Running
+Cluster nodes           Recognised
+
+GitOps
+────────────────────────────────
+Platform                Argo CD
+Hostname                argocd.local
+Dashboard access        Working
+
+Recovery
+────────────────────────────────
+Clean k3s snapshot      Created
+Ingress/storage state   Created
+Argo CD state           Created
+```
+
+## Next Steps
+
+With the infrastructure stable again, the next phase will shift from manually creating cluster resources to managing them through Git.
+
+I plan to connect Argo CD to my Git repository and define the applications declaratively. Instead of running `kubectl apply` for every deployment, Argo CD will read the manifests from the repository and keep the cluster synchronised with them.
+
+The first GitOps-managed workload will likely be my portfolio application. After that, I can begin introducing Prometheus, Grafana, Gitea, Harbor, Jenkins, and other services through the same workflow.
+
+Day 7 was not simply a return to where the project had been before the failure. The rebuilt environment is cleaner, easier to understand, and much faster to recover.
+
+The previous cluster taught me how systems fail. This rebuild taught me how to design the next version so that failure is easier to survive.
