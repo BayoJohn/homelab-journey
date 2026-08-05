@@ -1,234 +1,310 @@
-# Day 5 – When the Homelab Started Feeling Like a Platform
+# Day 9 – The Day My Homelab Started Feeling Like a Platform
 
-There are days when you install a piece of software, verify that it's running, and call it a day.
+Today started with a small annoyance.
 
-Then there are days like today.
+Every service in the homelab had its own address, and every time I wanted to check something, I had to remember where it lived. Grafana was open in one tab, Gitea in another, Longhorn somewhere else, and Prometheus usually buried among several terminal windows.
 
-I didn't set out to deploy half a dozen services or spend hours debugging distributed systems. The plan was much simpler: continue building the homelab, understand the cluster a little better, and maybe add another component before the day was over.
+Nothing was technically wrong with that setup, but it still felt unfinished. I had built several useful services, yet there was no simple way to move between them.
 
-Instead, today became one of those days where every new discovery led to another question, and every answer uncovered something I hadn't fully understood before.
+So the first thing I did was deploy Homepage.
 
-By the time I finally shut everything down for the night, the homelab no longer felt like a Kubernetes cluster with a few applications running on top of it.
+Homepage is not the most complex application in the cluster, and it did not teach me a new Kubernetes concept. Still, it changed the way the entire environment felt.
 
-It had started to feel like an actual platform.
+Instead of treating each service as a separate project, I could now open one dashboard and reach Gitea, Grafana, Longhorn, Argo CD, Prometheus, and the rest of the platform from the same place.
 
----
+It was a small improvement, but it made the homelab feel organised for the first time. There was finally a front door.
 
-# A Small Dashboard That Changed Everything
+I could have stopped there and considered the day productive.
 
-One thing had been bothering me for a while.
+Instead, I decided to shut down one of the nodes.
 
-Every time I wanted to check the health of the cluster, I found myself opening Grafana in one tab, Gitea in another, Longhorn somewhere else, and Prometheus in yet another browser window. It worked, but it felt disorganized.
+## Testing What Happens When a Node Disappears
 
-So I decided to deploy **Homepage**.
+I had spent several days building a two-node Kubernetes cluster, but I had never properly tested what would happen if one of those nodes failed.
 
-It wasn't the most technically challenging application I've installed, but it instantly changed the way I interacted with the homelab. Instead of remembering URLs or keeping browser tabs permanently open, I now had a single place where every service could be reached.
+I understood the theory. Kubernetes constantly watches the state of its nodes. When a node becomes unavailable, workloads managed by controllers such as Deployments can eventually be recreated elsewhere.
 
-Sometimes it's the smallest improvements that make an environment feel much more polished.
+I had read about that behaviour many times, but I had not watched it happen in my own environment.
 
-For the first time, the homelab had its own landing page.
+The worker node was running several cluster services and application workloads, so shutting it down felt uncomfortable. That was exactly why I wanted to do it.
 
----
+I powered off `k3s-worker1` and began watching the cluster.
 
-# Breaking the Cluster on Purpose
+After a short period, Kubernetes marked the worker as:
 
-With Homepage out of the way, curiosity took over.
+```text
+NotReady
+```
 
-Over the last few days I had built a two-node Kubernetes cluster, but there was one question I couldn't answer honestly:
+Pods that had been running there became unavailable. For workloads controlled by Deployments, Kubernetes eventually began creating replacement Pods on the remaining control-plane node.
 
-**What actually happens when one of the nodes disappears?**
+Watching that happen made the scheduler and controller logic feel much less abstract.
 
-I had read countless articles explaining how Kubernetes reschedules workloads when nodes fail, but reading documentation and watching it happen are two completely different experiences.
+The cluster was not simply “moving” the old containers. It was recognising that the desired number of replicas no longer existed and creating new Pods on a node that was still available.
 
-So I did something that felt slightly uncomfortable.
+The stateless applications recovered reasonably well.
 
-I shut down my worker node.
+Then I powered the worker back on.
 
-Then I sat back and watched.
+At first, the cluster appeared to return to normal. Both nodes became available again, Pods started running, and nothing looked seriously broken from the usual status commands.
 
-Almost immediately the cluster reacted. Kubernetes marked the node as **NotReady**, and after a short delay Deployments began scheduling replacement Pods onto the control plane.
+But Gitea was no longer working properly.
 
-Watching Kubernetes make those decisions automatically was strangely satisfying. It wasn't magic anymore—I could finally see the control plane doing exactly what it had been designed to do.
+## Everything Looked Healthy, but Gitea Was Broken
 
-But while stateless applications recovered gracefully, the same couldn't be said for everything else.
+The strange part was that Gitea did not appear completely down.
 
----
+Its Pods were running. PostgreSQL was available. Kubernetes was not showing an obvious scheduling failure, and the application interface could still be reached.
 
-# The Moment Everything Broke
+Users simply could not log in.
 
-Not long after bringing the worker node back online, something was clearly wrong.
+That made the problem more difficult to understand because there was no single failed Pod pointing directly to the cause.
 
-Gitea refused to work.
+I started checking the services Gitea depended on.
 
-At first glance everything looked healthy. The Pods were running, PostgreSQL appeared fine, and Kubernetes wasn't reporting any obvious failures.
+PostgreSQL appeared healthy, so I moved on to Valkey, the Redis-compatible service used by the deployment.
 
-But users couldn't log in.
+That was where the real problem was hiding.
 
-The logs eventually pointed me in an unexpected direction.
+During the worker-node outage, the Valkey cluster had lost quorum. One of its members disappeared, and when Kubernetes later recreated the Pod, it returned with a different network identity.
 
-The problem wasn't Gitea itself.
+Kubernetes was satisfied because the expected number of Pods existed again. Valkey was not.
 
-It wasn't PostgreSQL either.
+The cluster still remembered information about the previous member, while the recreated Pod joined with a new identity. From the outside, all the Pods looked alive. Internally, however, the Valkey nodes no longer agreed on the state of the cluster.
 
-It was **Valkey**.
+That was the first time I had personally encountered a distributed application that appeared healthy at the Kubernetes level while being broken at the application level.
 
-During the outage, the Valkey cluster had lost quorum. When Kubernetes recreated one of the Pods, the cluster still remembered the old node identity. From Kubernetes' perspective everything looked healthy, but from Valkey's perspective the cluster had split into two different realities.
+A green Pod status did not mean the service inside it was functioning correctly.
 
-That was one of those moments where distributed systems stop being abstract concepts and become very real.
+## Rebuilding the Valkey Cluster
 
----
+The next few hours were spent trying to understand exactly what Valkey believed had happened.
 
-# Learning More From Failure Than Success
+I inspected the StatefulSet and compared the cluster node IDs. I checked readiness probes, reviewed slot assignments, restarted Pods, read logs, and compared the old addresses stored in the cluster configuration with the IP addresses of the recreated Pods.
 
-The next few hours disappeared into troubleshooting.
+At first, I kept thinking in terms of Kubernetes.
 
-I inspected StatefulSets.
+Which Pod was failing?
 
-Compared cluster node IDs.
+Which container needed restarting?
 
-Checked readiness probes.
+Which object had Kubernetes created incorrectly?
 
-Looked at cluster slot assignments.
+Eventually, it became clear that Kubernetes had done what it was supposed to do. It had restored the Pods.
 
-Restarted Pods.
+The application running inside those Pods was the part that could not recover cleanly.
 
-Read logs.
+Valkey was still holding onto the identity of a node that no longer existed. Restarting the same Pods did not repair that disagreement because the broken cluster state was being preserved.
 
-Compared old IP addresses with new ones.
+The cleanest solution was to rebuild the Valkey cluster rather than continue trying to force the existing members to agree.
 
-Every command revealed another small piece of the puzzle.
-
-Eventually I realised that I wasn't dealing with a broken Pod.
-
-I was dealing with a distributed system that no longer agreed with itself.
-
-The cleanest solution turned out to be rebuilding the Valkey cluster entirely.
-
-A few moments later the cluster reported:
+After recreating it, I checked the cluster state again.
 
 ```text
 cluster_state: ok
 cluster_slots_ok: 16384
 ```
 
-Almost instantly Gitea came back to life.
+Shortly afterward, Gitea login began working again.
 
-Looking back, I probably learned more from those few hours of troubleshooting than I had from several successful deployments combined.
+That was the point where the entire failure finally made sense.
 
----
+Gitea had not been broken by its web container or its database. Authentication was failing because a supporting distributed service had lost quorum during the node outage and had not recovered correctly when the missing node returned.
 
-# Building My Own CI Platform
+It was a deeper failure than a normal Pod restart, and it taught me far more than another successful Helm installation would have.
 
-Once the cluster was healthy again, I turned my attention to something I had been looking forward to for weeks.
+## Completing the Development Workflow
 
-Continuous Integration.
+Once Gitea was stable again, I moved on to the part of the platform I had been looking forward to building: continuous integration.
 
-I deployed **Drone Server** into Kubernetes and connected it to my self-hosted Gitea instance using OAuth.
+I deployed Drone Server inside Kubernetes and connected it to Gitea using OAuth.
 
-Seeing Drone redirect me to **my own Git server** instead of GitHub felt surprisingly rewarding.
+The first successful login was unexpectedly satisfying. Instead of being redirected to GitHub or another public service, Drone sent me to the Git server running inside my own cluster.
 
-For the first time, every major part of the development workflow was running on infrastructure I had built myself.
+The source-code platform and the CI system were now connected entirely within the homelab.
 
-But the Drone Server is only half the story.
+Drone Server handled the user interface, repository integration, and pipeline coordination, but it still needed somewhere to execute the actual jobs.
 
-Without a runner, it can't actually execute pipelines.
+For that, I deployed the Drone Kubernetes Runner.
 
-So I deployed the **Drone Kubernetes Runner**.
+This changed the way builds would run compared with some of my earlier CI experiments.
 
-This was particularly interesting because it highlighted one of the biggest differences between my previous homelab and the one I'm building now.
+Previously, a CI runner might create Docker containers directly on the host. In this setup, Drone sends a request to Kubernetes, and Kubernetes creates temporary Pods for the pipeline steps.
 
-Previously, Drone launched Docker containers directly.
+The runner does not need to manage the underlying containers itself. It asks Kubernetes to schedule them, provide resources, and remove them when the build is complete.
 
-Now, Drone simply asks Kubernetes to create Pods on its behalf.
+The flow now looked like this:
 
-The responsibility for running builds has shifted from Docker to Kubernetes.
+```text
+Developer pushes code to Gitea
+              ↓
+Drone detects the repository event
+              ↓
+Drone creates a pipeline job
+              ↓
+Kubernetes Runner requests build Pods
+              ↓
+Kubernetes schedules and runs the pipeline
+```
 
-It was a subtle difference in architecture, but an important one.
+That was an important architectural shift.
 
----
+Kubernetes was no longer only hosting the CI platform. It had also become the execution environment for the builds themselves.
 
-# Solving the Registry Problem
+## Giving the Pipelines Somewhere to Push Images
 
-With CI running, another missing piece became obvious.
+After connecting Gitea and Drone, the next missing piece became obvious.
 
-Where would all the container images go?
+The pipelines could build container images, but I still needed somewhere private to store them.
 
-The answer was Harbor.
+That led to Harbor.
 
-Unfortunately, Harbor is a fairly large application, and my Longhorn cluster had already started warning me that storage was becoming limited.
+Harbor would give the homelab its own container registry, allowing Drone to build images and push them internally. Argo CD could then deploy workloads that referenced those images.
 
-Rather than forcing the installation and hoping for the best, I decided to understand the problem first.
+Installing Harbor would complete a much larger chain:
 
-After inspecting Longhorn's available capacity, I created a dedicated **single-replica StorageClass** specifically for Harbor.
+```text
+Gitea → Drone → Harbor → Argo CD → Kubernetes
+```
 
-It wasn't the most resilient configuration, but it fit my current hardware while still giving me a fully functional private registry.
+Harbor is not a lightweight application. It includes several services of its own, such as the registry, portal, core service, database, Redis, and job service.
 
-I also disabled Trivy for now, choosing stability over additional features.
+Before installing it, I checked the available Longhorn storage and realised that the cluster was already becoming constrained.
 
-A few minutes later, Harbor Core, Registry, Portal, PostgreSQL, Redis, and Jobservice were all running successfully.
+My existing two-replica StorageClass was appropriate for important workloads that needed node-level redundancy, but using two replicas for every Harbor volume would consume storage quickly.
 
-It was another reminder that good engineering is often about making sensible trade-offs rather than blindly enabling every feature available.
+I had to choose between forcing the more resilient configuration and potentially running out of usable capacity, or accepting lower redundancy for the registry.
 
----
+I created a separate single-replica Longhorn StorageClass specifically for Harbor.
 
-# Cleaning Up the Project
+This meant Harbor’s volumes would have only one Longhorn replica. If the node holding that replica failed permanently before the data could be recovered, the registry data could be lost.
 
-Before calling it a day, I spent some time looking beyond the cluster itself.
+It was not the configuration I would choose for an important production registry, but it was a practical decision for the hardware currently available in the homelab.
 
-Over the last few weeks I had accumulated dozens of configuration files spread across my home directory.
+The registry could always be rebuilt from source repositories and CI pipelines if necessary. That made it a better candidate for reduced replication than services containing unique or difficult-to-recreate data.
 
-It was time to organise them properly.
+I also disabled Trivy temporarily.
 
-I created dedicated directories for every major service, moved Helm values files into version control, removed duplicate manifests, replaced sensitive passwords with placeholders, and started treating the repository like an actual infrastructure codebase rather than a dumping ground for YAML files.
+Vulnerability scanning would be useful later, but it would require additional resources and container images. At this stage, getting a stable registry running was more important than enabling every optional feature.
 
-It was one of those tasks that isn't particularly exciting, but pays dividends later.
+After applying those decisions, the Harbor services began starting successfully.
 
----
+Harbor Core, Registry, Portal, PostgreSQL, Redis, and Jobservice all became operational.
 
-# Looking Back
+For the first time, the homelab had its own private container registry.
 
-A week ago, I was mostly learning Kubernetes commands.
+## Cleaning Up What I Had Built
 
-Today, those commands are only a small part of what I'm building.
+By this point, the cluster had grown significantly, but the files used to create it were scattered across my home directory.
 
-Source code now lives in **Gitea**.
+Some Helm values files were stored in temporary folders. Several manifests had duplicate versions. A few configurations still contained values that should never be committed directly to Git.
 
-**Drone** watches repositories and executes pipelines.
+The cluster was beginning to resemble a real platform, but the repository behind it did not.
 
-**Harbor** stores container images.
+Before finishing for the day, I started cleaning everything up.
 
-**Argo CD** handles deployments.
+I created separate directories for the major services and moved their Helm values and Kubernetes manifests into the appropriate locations. I removed outdated copies, replaced passwords and tokens with placeholders, and began organising the repository as though another person might need to understand it later.
 
-**Longhorn** provides persistent storage.
+The difference was not immediately visible from inside the cluster, but it mattered.
 
-**Loki** and **Alloy** collect logs.
+A platform is not reproducible if the only working configuration exists in shell history or in random files scattered across one machine.
 
-**Prometheus** gathers metrics.
+The repository needed to explain how the environment had been built.
 
-**Grafana** visualises everything.
+By the end of the cleanup, the project looked less like a folder of experiments and more like an infrastructure codebase.
 
-And **Homepage** brings it all together behind a single dashboard.
+## What Changed Today
 
-For the first time since I started this project, I stopped looking at individual applications and started seeing an ecosystem.
+At the start of the day, I had a Kubernetes cluster running several independent services.
 
----
+By the end of it, those services had begun forming a connected workflow.
 
-# Final Thoughts
+Gitea stored the source code and Kubernetes configuration.
 
-Today wasn't really about installing software.
+Drone watched the repositories and created CI jobs.
 
-It was about understanding how each component fits into a larger system.
+The Kubernetes Runner executed those jobs as Pods.
 
-More importantly, it reminded me that the most valuable lessons rarely come from deployments that work the first time. They come from unexpected failures, confusing log files, and long debugging sessions where understanding is earned one clue at a time.
+Harbor stored the resulting container images.
 
-The homelab is still far from finished.
+Argo CD handled the deployment side of the process.
 
-There are plenty of technologies left to explore and countless improvements to make.
+Longhorn provided storage to the stateful services.
 
-But today it crossed an important milestone.
+Prometheus collected metrics, while Grafana made them visible.
 
-It no longer feels like a collection of Kubernetes experiments.
+Loki and Alloy handled the logging side of the environment.
 
-It feels like the beginning of a platform I can continue building, breaking, improving, and learning from for a long time to come.
+Homepage provided one place to access the platform.
 
----
+The architecture was no longer just a list of applications I had installed.
+
+The parts were beginning to depend on and support one another.
+
+```text
+Source Code
+   Gitea
+      ↓
+Continuous Integration
+   Drone
+      ↓
+Container Images
+   Harbor
+      ↓
+Continuous Delivery
+   Argo CD
+      ↓
+Runtime Platform
+   Kubernetes
+      ↓
+Storage and Observability
+   Longhorn, Prometheus, Grafana, Loki and Alloy
+```
+
+The node-failure test also exposed the cost of that growing dependency.
+
+When Valkey lost quorum, Gitea authentication stopped working even though most of the visible application Pods still appeared healthy.
+
+The more connected the platform becomes, the more important it is to understand the behaviour of each supporting service during failure.
+
+## End of Day 9
+
+Today was not memorable because of the number of applications I installed.
+
+The most valuable part was watching the platform fail in a way I had not expected.
+
+Shutting down one worker node showed that stateless Kubernetes workloads could be recreated elsewhere, but it also exposed the limitations of a distributed stateful service that could not automatically recover its cluster membership.
+
+Recovering Valkey forced me to look beyond Pod status and examine what the application itself believed about the cluster.
+
+Deploying Drone showed me how Kubernetes could serve as the execution engine for CI pipelines rather than only hosting the CI server.
+
+Installing Harbor forced me to make a real infrastructure trade-off between storage resilience and available capacity.
+
+Even the repository cleanup reflected a change in how I was approaching the project. I was no longer creating files only to make the next deployment work. I was beginning to organise the environment so that it could be understood, reproduced, and repaired later.
+
+A week earlier, most of my progress could be measured by whether I had learned a new `kubectl` command.
+
+Now the more important questions were different.
+
+What happens when a node disappears?
+
+Which services recover automatically?
+
+Which applications preserve outdated cluster membership?
+
+Where should build jobs run?
+
+Where should images be stored?
+
+Which data requires replication, and which data can be recreated?
+
+Those are no longer questions about installing Kubernetes.
+
+They are questions about operating a platform.
+
+The homelab is still small, and several parts of it are limited by the hardware underneath them. Both Kubernetes nodes still run on the same Proxmox host, storage capacity is restricted, and some of the resilience exists only at the virtual-machine level.
+
+But today was the first time the environment felt like more than a collection of tools.
+
+It felt like a system I could continue building, breaking, understanding, and improving.
