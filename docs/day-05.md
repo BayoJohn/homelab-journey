@@ -1,4 +1,4 @@
-# Day 4 – Building the First Production Workloads
+# Day 5 – Building the First Production Workloads
 
 Until today, most of my homelab work had focused on building the Kubernetes environment itself.
 
